@@ -1,0 +1,6 @@
+.status
+__pycache__/
+ocr_out/
+tessdata/
+.ocr_tmp/
+catalogs/debug/

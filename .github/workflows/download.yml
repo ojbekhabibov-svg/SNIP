@@ -1,0 +1,81 @@
+name: Скачать СНиП и пособия к СНиП с meganorm.ru
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_total_mb:
+        description: "Лимит объёма папки files/ в этом репозитории, МБ"
+        default: "4500"
+      only_ids:
+        description: "Только эти id документов через запятую (для докачки в другой репозиторий); пусто = все"
+        default: ""
+      delay:
+        description: "Пауза после каждого PDF/HTM, сек"
+        default: "1.0"
+      attempt:
+        description: "Номер прогона (автоперезапуск, макс. 15)"
+        default: "1"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: snip-download
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Настройка git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+
+      - name: Скачивание (коммит каждые 25 документов, стоп через 320 мин)
+        env:
+          OUT_DIR: ${{ github.workspace }}
+          MAX_TOTAL_MB: ${{ inputs.max_total_mb }}
+          ONLY_IDS: ${{ inputs.only_ids }}
+          DELAY: ${{ inputs.delay }}
+          COMMIT_EVERY: "25"
+          RUN_MINUTES: "320"
+        run: python scripts/download_snip.py
+
+      - name: Финальный коммит (реестр, README, остаток)
+        if: always()
+        run: |
+          git add -A
+          git diff --cached --quiet || git commit -m "СНиП: реестр index.csv, README, remaining.csv (прогон ${{ inputs.attempt }})"
+          git pull --rebase -q || true
+          git push
+
+      - name: Автоперезапуск, если не всё скачано
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          STATUS=$(cat .status 2>/dev/null || echo unknown)
+          echo "Статус: $STATUS"
+          NEXT=$(( ${{ inputs.attempt }} + 1 ))
+          if [ "$STATUS" = "incomplete" ] && [ "$NEXT" -le 15 ]; then
+            gh workflow run download.yml --ref main \
+              -f max_total_mb="${{ inputs.max_total_mb }}" \
+              -f only_ids="${{ inputs.only_ids }}" \
+              -f delay="${{ inputs.delay }}" \
+              -f attempt="$NEXT"
+            echo "Запущен прогон $NEXT"
+          elif [ "$STATUS" = "complete" ] || [ "$STATUS" = "limit" ]; then
+            gh workflow run build.yml --ref main
+            echo "Скачивание завершено — запущена сборка регистров"
+          fi

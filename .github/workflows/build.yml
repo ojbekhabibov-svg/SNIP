@@ -1,0 +1,84 @@
+name: Регистры СНиП (OCR + упрощённые тексты)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rebuild_text:
+        description: "Пересобрать все тексты заново (1 = да)"
+        default: "0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snip-build
+  cancel-in-progress: false
+
+jobs:
+  ocr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tesseract (rus, tessdata_best)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr poppler-utils >/dev/null
+          pip install -q pillow
+          mkdir -p tessdata
+          for l in rus eng; do
+            curl -sSL -o tessdata/$l.traineddata https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/$l.traineddata
+          done
+          ls -la tessdata
+      - name: OCR части документов
+        env:
+          OUT_DIR: ${{ github.workspace }}
+          TESSDATA_PREFIX: ${{ github.workspace }}/tessdata
+          OMP_THREAD_LIMIT: "1"
+        run: python scripts/ocr_shard.py ${{ matrix.shard }} 12 ocr_out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ocr-${{ matrix.shard }}
+          path: ocr_out/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  build:
+    needs: ocr
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install openpyxl pymupdf pillow
+          sudo apt-get install -y -qq poppler-utils >/dev/null
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ocr-*
+          path: ocr_out
+          merge-multiple: true
+      - name: Сборка регистров и текстов
+        env:
+          OUT_DIR: ${{ github.workspace }}
+          OCR_DIR: ocr_out
+          REBUILD_TEXT: ${{ inputs.rebuild_text }}
+        run: |
+          python scripts/build_registers.py
+          python scripts/figures_fix.py
+          python scripts/build_registers.py
+      - name: Коммит
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git add -A text registers figures AI_INDEX.md README.md
+          git diff --cached --quiet || git commit -q -m "СНиП: регистры по направлениям, упрощённые тексты, AI_INDEX"
+          git pull --rebase -q || true
+          git push
